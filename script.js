@@ -27,6 +27,24 @@ const demoList = [
   { id: 'paint', title: 'Paint App', icon: 'bi-palette' }
 ];
 
+// Replace showNotification with showToast
+function showToast(title, message, type = 'success') {
+  const toastContainer = document.querySelector('.toast-container');
+  const toastEl = document.createElement('div');
+  toastEl.className = 'toast';
+  toastEl.innerHTML = `
+    <div class="toast-header bg-${type} text-white">
+      <strong class="me-auto">${title}</strong>
+      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
+    </div>
+    <div class="toast-body">${message}</div>
+  `;
+  toastContainer.appendChild(toastEl);
+  const toast = new bootstrap.Toast(toastEl);
+  toast.show();
+  toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+}
+
 document.querySelector("#app-prompt").addEventListener("submit", async (e) => {
   e.preventDefault();
 
@@ -63,18 +81,22 @@ const loadingHTML = html` <div class="d-flex justify-content-center align-items-
 
 function drawMessages(messages) {
   render(
-    messages.map(
-      ({ role, content, loading }) => html`
+    messages.map(({ role, content, loading }, i) => {
+      const parsedContent = marked.parse(content);
+      return html`
         <section class="message ${role}-message mb-4">
           <div class="fw-bold text-capitalize mb-2">${role}:</div>
-          <div class="message-content">${unsafeHTML(marked.parse(content))}</div>
-          ${role == "assistant" ? (loading ? loadingHTML : unsafeHTML(drawOutput(content))) : ""}
+          <div class="message-content">
+            ${role === "assistant" ? unsafeHTML(drawCollapsibleSections(parsedContent, i)) : unsafeHTML(parsedContent)}
+            ${role === "assistant" && !loading ? unsafeHTML(drawOutput(content)) : ""}
+          </div>
         </section>
-      `
-    ),
+      `;
+    }),
     $response
   );
 }
+
 
 const contentCache = {};
 
@@ -109,114 +131,41 @@ document.querySelector("#save-conversation").addEventListener("click", () => {
       await writable.write(fileContent);
       await writable.close();
       modal.hide();
-      const toast = new bootstrap.Toast(Object.assign(document.createElement('div'), {
-        className: 'toast position-fixed bottom-0 end-0 m-3',
-        innerHTML: `
-          <div class="toast-header bg-success text-white">
-            <strong class="me-auto">Success</strong>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
-          </div>
-          <div class="toast-body">Conversation saved as ${input.value}.js</div>
-        `
-      }));
-      document.body.appendChild(toast.element);
-      toast.show();
-      setTimeout(() => document.body.removeChild(toast.element), 3000);
+      showToast("Success", `Conversation saved as ${input.value}.js`);
     } catch (error) {
-      const errorMsg = error.name === 'SecurityError' ? 
-        'Please try saving again. The file picker requires a direct user interaction.' : 
-        `Save failed: ${error.message}`;
       console.error("Error saving:", error);
-      const toast = new bootstrap.Toast(Object.assign(document.createElement('div'), {
-        className: 'toast position-fixed bottom-0 end-0 m-3',
-        innerHTML: `
-          <div class="toast-header bg-danger text-white">
-            <strong class="me-auto">Error</strong>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
-          </div>
-          <div class="toast-body">${errorMsg}</div>
-        `
-      }));
-      document.body.appendChild(toast.element);
-      toast.show();
-      setTimeout(() => document.body.removeChild(toast.element), 3000);
+      showToast("Error", error.name === 'SecurityError' ? 
+        'Please try saving again. File picker requires user interaction.' : 
+        `Save failed: ${error.message}`, 'danger');
     }
   };
 
   document.getElementById('saveButton').onclick = saveHandler;
   modal.show();
-  setTimeout(() => input.focus(), 500);
+  setTimeout(() => input.focus(), 200);
 });
 
 document.querySelector("#load-conversation").addEventListener("click", async () => {
-  const folderPath = 'files';
-  const files = await getFilesFromFolder(folderPath);
-  files && files.length ? showFileSelectionDialog(files,folderPath) : alert("No files found.");
-});
-
-async function showFileSelectionDialog(fileUrls,folderPath) {
-  return new Promise((resolve) => {
-    const modal = new bootstrap.Modal(document.getElementById('loadModal'));
-    const fileList = document.getElementById('fileList');
-    fileList.innerHTML = ''; // Clear existing files
-
-    fileUrls.forEach(fileUrl => {
-      const fileName = fileUrl.split('/').pop();
-      const fullFileUrl = `${window.location.origin}/${folderPath}/${fileName}`;
-      const button = document.createElement('button');
-      button.className = 'list-group-item list-group-item-action';
-      button.textContent = fileName;
-      
-      button.addEventListener('click', async () => {
-        try {
-          const response = await fetch(fullFileUrl);
-          if (!response.ok) throw new Error(`Fetch failed: ${fullFileUrl}`);
-          const fileContent = await response.text();
-          let conversation;
-          try {
-            conversation = eval(fileContent + '; conversation');
-          } catch (error) {
-            console.error("Parse error:", error);
-            modal.hide();
-            alert("Load failed.");
-            return;
-          }
-          messages.length = 0;
-          messages.push(...conversation);
-          drawMessages(messages);
-          modal.hide();
-          resolve();
-        } catch (error) {
-          console.error("Load error:", error);
-          alert("Load failed.");
-        }
-      });
-      
-      fileList.appendChild(button);
-    });
-
-    modal.show();
-    modal._element.addEventListener('hidden.bs.modal', () => resolve(null));
-  });
-}
-
-async function getFilesFromFolder(folderPath) {
   try {
-    const response = await fetch(folderPath, { method: 'GET', headers: { 'Accept': 'application/json' } });
-    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-
-    const contentType = response.headers.get("content-type");
-
-    if (contentType && contentType.includes("application/json")) {  // Fixed missing parenthesis
-      return await response.json();
-    } else {
-      throw new Error(`Unexpected content type: ${contentType}`);
-    }
+    const [fileHandle] = await window.showOpenFilePicker({
+      types: [{ description: 'JavaScript files', accept: { 'text/javascript': ['.js'] }}]
+    });
+    
+    const file = await fileHandle.getFile();
+    const fileContent = await file.text();
+    const conversation = eval(fileContent + '; conversation');
+    
+    messages.length = 0;
+    messages.push(...conversation);
+    drawMessages(messages);
+    showToast("Success", "Conversation loaded successfully");
   } catch (error) {
-    console.error("Fetch files error:", error);
-    return [];
+    if (error.name !== 'AbortError') {
+      console.error("Load error:", error);
+      showToast("Error", "Failed to load file", 'danger');
+    }
   }
-}
+});
 
 function renderDemos() {
   const demosContainer = document.getElementById('demos');
@@ -245,25 +194,61 @@ function renderDemos() {
       messages.length = 0;
       messages.push(...conversation);
       drawMessages(messages);
-      
-      const toastEl = document.createElement('div');
-      toastEl.className = 'toast position-fixed bottom-0 end-0 m-3';
-      toastEl.innerHTML = `
-        <div class="toast-header bg-success text-white">
-          <strong class="me-auto">Success</strong>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
-        </div>
-        <div class="toast-body">Demo "${demoId}" loaded successfully</div>
-      `;
-      document.body.appendChild(toastEl);
-      const toast = new bootstrap.Toast(toastEl);
-      toast.show();
-      setTimeout(() => document.body.removeChild(toastEl), 3000);
+      showToast("Success", `Demo "${demoId}" loaded successfully`);
     } catch (error) {
       console.error("Demo load error:", error);
-      alert("Failed to load demo");
+      showToast("Error", "Failed to load demo", 'danger');
     }
   });
 }
-
 renderDemos();
+
+
+function drawCollapsibleSections(htmlContent, index) {
+  const codeBlockRegex = /<pre><code[\s\S]*?<\/code><\/pre>/i;
+  const match = htmlContent.match(codeBlockRegex);
+  
+  if (!match) {
+    const template = document.getElementById('single-accordion-template');
+    const accordion = template.content.cloneNode(true);
+    const accordionEl = accordion.querySelector('.accordion');
+    accordionEl.id = `accordion-${index}`;
+    
+    const collapseButton = accordion.querySelector('.accordion-button');
+    const collapseDiv = accordion.querySelector('.accordion-collapse');
+    const collapseId = `explanation-${index}`;
+    
+    collapseButton.dataset.bsToggle = 'collapse';
+    collapseButton.dataset.bsTarget = `#${collapseId}`;
+    collapseDiv.id = collapseId;
+    collapseDiv.dataset.bsParent = `#accordion-${index}`;
+    
+    accordion.querySelector('.accordion-body').innerHTML = htmlContent;
+    return accordion.firstElementChild.outerHTML;
+  }
+
+  const template = document.getElementById('double-accordion-template');
+  const accordion = template.content.cloneNode(true);
+  const accordionEl = accordion.querySelector('.accordion');
+  accordionEl.id = `accordion-${index}`;
+  
+  const buttons = accordion.querySelectorAll('.accordion-button');
+  const collapseDivs = accordion.querySelectorAll('.accordion-collapse');
+  
+  ['code', 'explanation'].forEach((type, i) => {
+    const collapseId = `${type}-${index}`;
+    buttons[i].dataset.bsToggle = 'collapse';
+    buttons[i].dataset.bsTarget = `#${collapseId}`;
+    collapseDivs[i].id = collapseId;
+    collapseDivs[i].dataset.bsParent = `#accordion-${index}`;
+  });
+  
+  const codeHtml = match[0];
+  const before = htmlContent.slice(0, match.index);
+  const after = htmlContent.slice(match.index + codeHtml.length);
+  
+  accordion.querySelectorAll('.accordion-body')[0].innerHTML = codeHtml;
+  accordion.querySelectorAll('.accordion-body')[1].innerHTML = before + after;
+  
+  return accordion.firstElementChild.outerHTML;
+}
